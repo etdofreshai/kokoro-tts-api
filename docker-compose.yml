@@ -1,0 +1,13 @@
+services:
+  kokoro-tts-api:
+    build: .
+    environment:
+      KOKORO_LANG: ${KOKORO_LANG:-a}
+      KOKORO_VOICE: ${KOKORO_VOICE:-af_heart}
+      API_KEY: ${API_KEY:-}
+    volumes:
+      - kokoro-models:/models
+    restart: unless-stopped
+
+volumes:
+  kokoro-models:
