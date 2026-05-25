@@ -4,10 +4,29 @@ services:
     environment:
       KOKORO_LANG: ${KOKORO_LANG:-a}
       KOKORO_VOICE: ${KOKORO_VOICE:-af_heart}
+      KOKORO_DEVICE: ${KOKORO_DEVICE:-cuda}
       API_KEY: ${API_KEY:-}
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    group_add:
+      - "993"   # render
+      - "44"    # video
+    cap_add:
+      - SYS_PTRACE
+    security_opt:
+      - seccomp=unconfined
+    ipc: host
+    shm_size: 4g
     volumes:
       - kokoro-models:/models
+    networks:
+      - dokploy-network
     restart: unless-stopped
+
+networks:
+  dokploy-network:
+    external: true
 
 volumes:
   kokoro-models:
