@@ -5,7 +5,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     KOKORO_LANG=a \
     KOKORO_VOICE=af_heart \
-    HF_HOME=/models
+    KOKORO_DEVICE=cpu \
+    HF_HOME=/models \
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \

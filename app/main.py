@@ -13,6 +13,7 @@ from kokoro import KPipeline
 
 DEFAULT_LANG = os.getenv("KOKORO_LANG", "a")  # a=en-us, b=en-gb, e=es, f=fr, h=hi, i=it, j=ja, p=pt-br, z=zh
 DEFAULT_VOICE = os.getenv("KOKORO_VOICE", "af_heart")
+KOKORO_DEVICE = os.getenv("KOKORO_DEVICE") or None
 API_KEY = os.getenv("API_KEY")
 SAMPLE_RATE = 24000
 
@@ -38,7 +39,7 @@ _pipelines: dict[str, KPipeline] = {}
 
 def get_pipeline(lang: str) -> KPipeline:
     if lang not in _pipelines:
-        _pipelines[lang] = KPipeline(lang_code=lang)
+        _pipelines[lang] = KPipeline(lang_code=lang, device=KOKORO_DEVICE)
     return _pipelines[lang]
 
 
@@ -116,7 +117,7 @@ def _encode(audio: np.ndarray, fmt: str) -> tuple[bytes, str]:
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "default_voice": DEFAULT_VOICE, "lang": DEFAULT_LANG, "sample_rate": SAMPLE_RATE}
+    return {"status": "ok", "default_voice": DEFAULT_VOICE, "lang": DEFAULT_LANG, "device": KOKORO_DEVICE or "auto", "sample_rate": SAMPLE_RATE}
 
 
 @app.get("/v1/models")
