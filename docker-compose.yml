@@ -8,6 +8,7 @@ services:
       KOKORO_PREWARM: ${KOKORO_PREWARM:-0}
       KOKORO_PREWARM_COUNT: ${KOKORO_PREWARM_COUNT:-1}
       KOKORO_PREWARM_TEXT: ${KOKORO_PREWARM_TEXT:-Kokoro startup prewarm for fast speech responses.}
+      KOKORO_PREWARM_TEXTS: ${KOKORO_PREWARM_TEXTS:-}
       API_KEY: ${API_KEY:-}
     volumes:
       - kokoro-models:/models

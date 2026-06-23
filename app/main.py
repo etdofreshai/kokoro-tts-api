@@ -40,6 +40,11 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_texts(name: str) -> list[str]:
+    value = os.getenv(name, "")
+    return [part.strip() for part in value.split("||") if part.strip()]
+
+
 DEFAULT_LANG = os.getenv("KOKORO_LANG", "a")  # a=en-us, b=en-gb, e=es, f=fr, h=hi, i=it, j=ja, p=pt-br, z=zh
 DEFAULT_VOICE = os.getenv("KOKORO_VOICE", "af_heart")
 KOKORO_DEVICE = os.getenv("KOKORO_DEVICE") or None
@@ -48,6 +53,7 @@ SAMPLE_RATE = 24000
 PREWARM_ENABLED = _env_bool("KOKORO_PREWARM", False)
 PREWARM_COUNT = max(0, _env_int("KOKORO_PREWARM_COUNT", 1))
 PREWARM_TEXT = os.getenv("KOKORO_PREWARM_TEXT", "Kokoro startup prewarm for fast speech responses.")
+PREWARM_TEXTS = _env_texts("KOKORO_PREWARM_TEXTS") or [PREWARM_TEXT]
 
 # OpenAI voice name -> Kokoro voice
 VOICE_MAP = {
@@ -281,22 +287,34 @@ def _run_prewarm() -> None:
     voice = _resolve_voice(DEFAULT_VOICE)
     lang = _prewarm_lang_for_voice(voice)
     _prewarm_started_at = time.monotonic()
+    total_passes = PREWARM_COUNT * len(PREWARM_TEXTS)
     logger.info(
-        "Starting Kokoro prewarm: count=%s voice=%s lang=%s device=%s",
+        "Starting Kokoro prewarm: count=%s texts=%s voice=%s lang=%s device=%s",
         PREWARM_COUNT,
+        len(PREWARM_TEXTS),
         voice,
         lang,
         KOKORO_DEVICE or "auto",
     )
 
     try:
+        pass_number = 0
         for index in range(PREWARM_COUNT):
-            produced_audio = False
-            for _ in _synthesize_stream(PREWARM_TEXT, voice, 1.0, lang):
-                produced_audio = True
-            if not produced_audio:
-                raise RuntimeError("No audio generated during prewarm")
-            logger.info("Kokoro prewarm pass %s/%s complete", index + 1, PREWARM_COUNT)
+            for text_index, text in enumerate(PREWARM_TEXTS):
+                produced_audio = False
+                for _ in _synthesize_stream(text, voice, 1.0, lang):
+                    produced_audio = True
+                if not produced_audio:
+                    raise RuntimeError("No audio generated during prewarm")
+                pass_number += 1
+                logger.info(
+                    "Kokoro prewarm pass %s/%s complete (round=%s text=%s chars=%s)",
+                    pass_number,
+                    total_passes,
+                    index + 1,
+                    text_index + 1,
+                    len(text),
+                )
     except Exception as exc:  # noqa: BLE001 - startup state is reported by /health.
         _prewarm_error = str(exc)
         logger.exception("Kokoro prewarm failed")
@@ -332,6 +350,8 @@ def _prewarm_status() -> dict[str, object]:
         "enabled": PREWARM_ENABLED,
         "state": state,
         "count": PREWARM_COUNT,
+        "text_count": len(PREWARM_TEXTS),
+        "total_passes": PREWARM_COUNT * len(PREWARM_TEXTS),
         "elapsed_s": elapsed,
         "error": _prewarm_error,
     }
