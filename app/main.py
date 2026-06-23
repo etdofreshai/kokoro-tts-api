@@ -1,26 +1,53 @@
 import io
 import itertools
+import logging
 import os
 import queue as queue_module
 import struct
 import subprocess
 import threading
+import time
 from collections.abc import Generator
 from typing import Optional
 
 import numpy as np
 import soundfile as sf
 from fastapi import Depends, FastAPI, Header, HTTPException
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from kokoro import KPipeline
+
+
+logger = logging.getLogger("kokoro-tts-api")
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        logger.warning("Ignoring invalid integer env %s=%r", name, value)
+        return default
+
 
 DEFAULT_LANG = os.getenv("KOKORO_LANG", "a")  # a=en-us, b=en-gb, e=es, f=fr, h=hi, i=it, j=ja, p=pt-br, z=zh
 DEFAULT_VOICE = os.getenv("KOKORO_VOICE", "af_heart")
 KOKORO_DEVICE = os.getenv("KOKORO_DEVICE") or None
 API_KEY = os.getenv("API_KEY")
 SAMPLE_RATE = 24000
+PREWARM_ENABLED = _env_bool("KOKORO_PREWARM", False)
+PREWARM_COUNT = max(0, _env_int("KOKORO_PREWARM_COUNT", 1))
+PREWARM_TEXT = os.getenv("KOKORO_PREWARM_TEXT", "Kokoro startup prewarm for fast speech responses.")
 
 # OpenAI voice name -> Kokoro voice
 VOICE_MAP = {
@@ -40,6 +67,13 @@ VOICE_MAP = {
 app = FastAPI(title="kokoro OpenAI-compatible TTS API")
 
 _pipelines: dict[str, KPipeline] = {}
+_prewarm_done = threading.Event()
+_prewarm_error: Optional[str] = None
+_prewarm_started_at: Optional[float] = None
+_prewarm_completed_at: Optional[float] = None
+
+if not PREWARM_ENABLED or PREWARM_COUNT == 0:
+    _prewarm_done.set()
 
 
 def get_pipeline(lang: str) -> KPipeline:
@@ -237,9 +271,95 @@ def _encode(audio: np.ndarray, fmt: str) -> tuple[bytes, str]:
     return proc.stdout, media[fmt]
 
 
+def _prewarm_lang_for_voice(voice: str) -> str:
+    return voice[:1] if voice and voice[0] in "abefhijpz" else DEFAULT_LANG
+
+
+def _run_prewarm() -> None:
+    global _prewarm_completed_at, _prewarm_error, _prewarm_started_at
+
+    voice = _resolve_voice(DEFAULT_VOICE)
+    lang = _prewarm_lang_for_voice(voice)
+    _prewarm_started_at = time.monotonic()
+    logger.info(
+        "Starting Kokoro prewarm: count=%s voice=%s lang=%s device=%s",
+        PREWARM_COUNT,
+        voice,
+        lang,
+        KOKORO_DEVICE or "auto",
+    )
+
+    try:
+        for index in range(PREWARM_COUNT):
+            produced_audio = False
+            for _ in _synthesize_stream(PREWARM_TEXT, voice, 1.0, lang):
+                produced_audio = True
+            if not produced_audio:
+                raise RuntimeError("No audio generated during prewarm")
+            logger.info("Kokoro prewarm pass %s/%s complete", index + 1, PREWARM_COUNT)
+    except Exception as exc:  # noqa: BLE001 - startup state is reported by /health.
+        _prewarm_error = str(exc)
+        logger.exception("Kokoro prewarm failed")
+    finally:
+        _prewarm_completed_at = time.monotonic()
+        _prewarm_done.set()
+
+
+@app.on_event("startup")
+def start_prewarm() -> None:
+    if _prewarm_done.is_set():
+        return
+    thread = threading.Thread(target=_run_prewarm, name="kokoro-prewarm", daemon=True)
+    thread.start()
+
+
+def _prewarm_status() -> dict[str, object]:
+    if not PREWARM_ENABLED:
+        state = "disabled"
+    elif _prewarm_error:
+        state = "failed"
+    elif _prewarm_done.is_set():
+        state = "ready"
+    else:
+        state = "warming"
+
+    elapsed = None
+    if _prewarm_started_at is not None:
+        finished_at = _prewarm_completed_at or time.monotonic()
+        elapsed = round(finished_at - _prewarm_started_at, 3)
+
+    return {
+        "enabled": PREWARM_ENABLED,
+        "state": state,
+        "count": PREWARM_COUNT,
+        "elapsed_s": elapsed,
+        "error": _prewarm_error,
+    }
+
+
+def _ensure_tts_ready() -> None:
+    if PREWARM_ENABLED and not _prewarm_done.is_set():
+        raise HTTPException(status_code=503, detail="TTS is warming up")
+    if _prewarm_error:
+        raise HTTPException(status_code=503, detail=f"TTS prewarm failed: {_prewarm_error}")
+
+
 @app.get("/health")
 def health():
-    return {"status": "ok", "default_voice": DEFAULT_VOICE, "lang": DEFAULT_LANG, "device": KOKORO_DEVICE or "auto", "sample_rate": SAMPLE_RATE}
+    prewarm = _prewarm_status()
+    payload = {
+        "status": "ok" if prewarm["state"] in {"disabled", "ready"} else prewarm["state"],
+        "default_voice": DEFAULT_VOICE,
+        "lang": DEFAULT_LANG,
+        "device": KOKORO_DEVICE or "auto",
+        "sample_rate": SAMPLE_RATE,
+        "prewarm": prewarm,
+    }
+    if prewarm["state"] == "warming":
+        return JSONResponse(status_code=503, content=payload)
+    if prewarm["state"] == "failed":
+        return JSONResponse(status_code=500, content=payload)
+    return payload
 
 
 @app.get("/v1/models")
@@ -263,6 +383,7 @@ def list_voices(_: None = Depends(verify_api_key)):
 def speech(req: SpeechRequest, _: None = Depends(verify_api_key)):
     if not req.input.strip():
         raise HTTPException(status_code=400, detail="input is empty")
+    _ensure_tts_ready()
     voice = _resolve_voice(req.voice)
     lang = req.language or voice[:1] if voice and voice[0] in "abefhijpz" else DEFAULT_LANG
     fmt = req.response_format

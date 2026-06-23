@@ -4,6 +4,10 @@ services:
     environment:
       KOKORO_LANG: ${KOKORO_LANG:-a}
       KOKORO_VOICE: ${KOKORO_VOICE:-af_heart}
+      KOKORO_DEVICE: ${KOKORO_DEVICE:-cpu}
+      KOKORO_PREWARM: ${KOKORO_PREWARM:-0}
+      KOKORO_PREWARM_COUNT: ${KOKORO_PREWARM_COUNT:-1}
+      KOKORO_PREWARM_TEXT: ${KOKORO_PREWARM_TEXT:-Kokoro startup prewarm for fast speech responses.}
       API_KEY: ${API_KEY:-}
     volumes:
       - kokoro-models:/models
